@@ -1,152 +1,248 @@
-# context_aware_reply.py
-"""
-上下文感知回复插件
-在Bot回复消息前，获取并注入当前会话的历史消息作为上下文
-"""
-
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
-from astrbot.api.provider import ProviderRequest
-from typing import List, Optional
+from astrbot.api.star import Context, Star
+from astrbot.api import logger
+from typing import Dict, Any, Optional
+import json
+from datetime import datetime
 
-
-@register("context_aware_reply", "AstrBot Plugin", "在Bot回复前注入会话上下文", "1.0.0")
-class ContextAwareReplyPlugin(Star):
+class GroupSpeakCounter(Star):
     """
-    上下文感知回复插件
-    
-    功能：当Bot准备回复消息时，自动获取当前会话的历史消息，
-    并将其添加到LLM请求的上下文中，使Bot能够参考之前的对话内容。
+    群聊发言统计插件
+    功能：统计群员发言次数（排除群主），显示发言榜，清除统计数据，可配置上榜人数
     """
     
     def __init__(self, context: Context):
         super().__init__(context)
-        # 可配置参数：获取最近几轮对话作为上下文
-        self.max_history_turns = 3  # 获取最近3轮对话
-        self.include_system_prompt = True  # 是否包含系统提示
+        self.storage_key = "group_speak_stats"
+        self.config_key = "top_n_config"
+        logger.info("群聊发言统计插件初始化完成")
     
-    @filter.on_llm_request(priority=10)
-    async def inject_context_to_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+    async def _get_stats(self) -> Dict[str, Any]:
+        """获取统计数据"""
+        stats = await self.get_kv_data(self.storage_key, {})
+        return stats if stats else {}
+    
+    async def _save_stats(self, stats: Dict[str, Any]):
+        """保存统计数据"""
+        await self.put_kv_data(self.storage_key, stats)
+    
+    async def _get_top_n(self) -> int:
+        """获取配置的上榜人数"""
+        top_n = await self.get_kv_data(self.config_key, 20)
+        if not isinstance(top_n, int) or top_n < 1 or top_n > 100:
+            top_n = 20
+        return top_n
+    
+    async def _save_top_n(self, top_n: int):
+        """保存上榜人数配置"""
+        await self.put_kv_data(self.config_key, top_n)
+    
+    async def _is_group_owner(self, event: AstrMessageEvent) -> bool:
         """
-        在LLM请求时注入上下文
+        判断发送者是否为群主
+        注意：AstrBot不同版本可能获取群主信息的方式不同，
+        这里提供几种常见方法的实现
+        """
+        # 方法1：通过事件属性直接判断
+        if hasattr(event, 'is_group_owner') and event.is_group_owner:
+            return True
         
-        参数:
-            event: AstrBot消息事件对象
-            req: LLM请求对象，包含请求文本、系统提示等信息
+        # 方法2：通过群成员信息判断（需要适配器支持）
+        if hasattr(event, 'member_info'):
+            member_info = event.member_info
+            if hasattr(member_info, 'role') and member_info.role == 'owner':
+                return True
+        
+        # 方法3：通过群成员列表判断（较慢，不推荐）
+        # 这里需要根据实际适配器API实现
+        
+        return False
+    
+    async def _update_user_count(self, group_id: str, user_id: str, user_name: str):
+        """更新用户发言计数"""
+        stats = await self._get_stats()
+        
+        if "group_stats" not in stats:
+            stats["group_stats"] = {}
+        
+        if group_id not in stats["group_stats"]:
+            stats["group_stats"][group_id] = {}
+        
+        # 获取当前计数，如果不存在则初始化为0
+        user_data = stats["group_stats"][group_id].get(user_id, {
+            "count": 0,
+            "name": user_name,
+            "last_active": None
+        })
+        
+        # 更新计数
+        user_data["count"] += 1
+        user_data["last_active"] = datetime.now().isoformat()
+        
+        # 保存更新后的数据
+        stats["group_stats"][group_id][user_id] = user_data
+        stats["last_update"] = datetime.now().isoformat()
+        
+        await self._save_stats(stats)
+        
+        logger.debug(f"更新发言计数: 群{group_id} 用户{user_name}({user_id}) 次数:{user_data['count']}")
+    
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def on_group_message(self, event: AstrMessageEvent):
         """
+        监听群消息事件，更新发言计数
+        注意：排除群主的消息
+        """
+        # 检查是否是群消息
+        if not hasattr(event, 'group_id') or not event.group_id:
+            return
+        
+        # 检查是否是群主，如果是则不统计
+        if await self._is_group_owner(event):
+            logger.debug(f"跳过群主消息: 群{event.group_id} 用户{event.get_sender_name()}")
+            return
+        
+        group_id = str(event.group_id)
+        user_id = str(event.sender_id)
+        user_name = event.get_sender_name()
+        
+        # 排除机器人自己的消息
+        if user_id == str(event.self_id):
+            return
+        
+        await self._update_user_count(group_id, user_id, user_name)
+    
+    @filter.command("发言榜", alias=["发言统计", "群发言榜"])
+    async def show_speak_rank(self, event: AstrMessageEvent):
+        """显示发言榜"""
+        group_id = str(event.group_id)
+        
+        # 检查是否在群聊中
+        if not group_id:
+            yield event.plain_result("该指令只能在群聊中使用！")
+            return
+        
+        stats = await self._get_stats()
+        
+        if "group_stats" not in stats or group_id not in stats["group_stats"]:
+            yield event.plain_result("本群暂无发言统计数据！")
+            return
+        
+        group_data = stats["group_stats"][group_id]
+        
+        # 按发言次数排序
+        sorted_users = sorted(
+            group_data.items(),
+            key=lambda x: x[1]["count"],
+            reverse=True
+        )
+        
+        # 获取配置的上榜人数
+        top_n = await self._get_top_n()
+        show_items = sorted_users[:top_n]
+        
+        # 构建发言榜
+        rank_list = []
+        for index, (user_id, user_info) in enumerate(show_items, 1):
+            rank_list.append(f"{index}. {user_info['name']}: {user_info['count']}次")
+        
+        if not rank_list:
+            yield event.plain_result("本群暂无发言统计数据！")
+            return
+        
+        # 构建完整消息
+        message = f"📊 群发言榜（{group_id}）\n"
+        message += "=" * 30 + "\n"
+        message += "\n".join(rank_list)
+        
+        # 添加统计信息
+        total_users = len(group_data)
+        total_messages = sum(user["count"] for user in group_data.values())
+        message += f"\n\n📈 统计信息: 共{total_users}人参与，累计发言{total_messages}次"
+        message += f"\n🕐 最后更新: {stats.get('last_update', '未知')}"
+        
+        yield event.plain_result(message)
+    
+    @filter.command("清除统计", alias=["重置统计"])
+    async def clear_stats(self, event: AstrMessageEvent):
+        """清除统计数据"""
+        group_id = str(event.group_id)
+        
+        if not group_id:
+            yield event.plain_result("该指令只能在群聊中使用！")
+            return
+        
+        # 获取当前统计
+        stats = await self._get_stats()
+        
+        if "group_stats" in stats and group_id in stats["group_stats"]:
+            # 清除本群统计
+            del stats["group_stats"][group_id]
+            stats["last_update"] = datetime.now().isoformat()
+            await self._save_stats(stats)
+            
+            yield event.plain_result(f"已清除群{group_id}的发言统计数据！")
+            logger.info(f"用户{event.get_sender_name()}清除了群{group_id}的发言统计")
+        else:
+            yield event.plain_result(f"群{group_id}暂无统计数据需要清除！")
+    
+    @filter.command("设置上榜人数", alias=["设置发言榜人数"])
+    async def set_top_n(self, event: AstrMessageEvent):
+        """设置上榜人数"""
+        # 解析指令参数
+        args = event.message_str.split()
+        
+        if len(args) < 2:
+            current_top_n = await self._get_top_n()
+            yield event.plain_result(f"当前上榜人数设置为: {current_top_n}人\n用法: /设置上榜人数 10")
+            return
+        
         try:
-            # 获取当前会话ID
-            session_id = event.session_id
-            
-            # 获取历史消息记录
-            history_messages = await self._get_session_history(session_id)
-            
-            if not history_messages:
+            new_top_n = int(args[1])
+            if new_top_n < 1 or new_top_n > 100:
+                yield event.plain_result("上榜人数范围应为1-100，请重新设置！")
                 return
             
-            # 构建上下文提示
-            context_prompt = self._build_context_prompt(history_messages)
+            # 保存配置
+            await self._save_top_n(new_top_n)
             
-            # 将上下文添加到系统提示中
-            if self.include_system_prompt and req.system_prompt:
-                req.system_prompt = f"{context_prompt}\n\n{req.system_prompt}"
-            else:
-                req.system_prompt = context_prompt
-                
-            # 记录日志（实际使用时可替换为正式日志系统）
-            print(f"[ContextPlugin] 已为会话 {session_id} 注入 {len(history_messages)} 条历史消息上下文")
+            yield event.plain_result(f"✅ 已将发言榜上榜人数设置为: {new_top_n}人")
+            logger.info(f"用户{event.get_sender_name()}将上榜人数设置为{new_top_n}")
             
-        except Exception as e:
-            print(f"[ContextPlugin] 注入上下文时出错: {e}")
+        except ValueError:
+            yield event.plain_result("❌ 请输入有效的数字！\n用法: /设置上榜人数 10")
     
-    async def _get_session_history(self, session_id: str) -> List[str]:
-        """
-        获取指定会话的历史消息记录
+    @filter.command("全局统计")
+    async def global_stats(self, event: AstrMessageEvent):
+        """显示全局统计信息（所有群）"""
+        stats = await self._get_stats()
         
-        参数:
-            session_id: 会话ID
-            
-        返回:
-            历史消息列表，每条消息格式为"角色: 内容"
-        """
-        try:
-            # 通过AstrBot的会话管理器获取历史记录
-            # 注意：这里需要AstrBot提供会话管理API，以下为示例实现
-            history = []
-            
-            # 实际项目中，您需要根据AstrBot的API获取会话历史
-            # 这里提供一个基本框架：
-            
-            # 1. 获取当前会话对象
-            session_controller = self.context.get_session_controller()
-            session = await session_controller.get_session(session_id)
-            
-            if not session:
-                return history
-            
-            # 2. 获取历史消息（实现可能因AstrBot版本而异）
-            # 假设会话对象有history_messages属性
-            if hasattr(session, 'history_messages'):
-                all_messages = session.history_messages[-self.max_history_turns:]
-                
-                for msg in all_messages:
-                    # 根据消息类型确定角色（用户或助手）
-                    role = "用户" if msg.sender_is_user() else "Bot"
-                    content = msg.message_str or str(msg.message)
-                    history.append(f"{role}: {content}")
-            
-            return history
-            
-        except Exception as e:
-            print(f"[ContextPlugin] 获取会话历史出错: {e}")
-            return []
-    
-    def _build_context_prompt(self, history_messages: List[str]) -> str:
-        """
-        构建上下文提示字符串
-        
-        参数:
-            history_messages: 历史消息列表
-            
-        返回:
-            格式化的上下文提示字符串
-        """
-        if not history_messages:
-            return ""
-        
-        context_lines = ["【当前对话历史上下文】"]
-        context_lines.extend(history_messages)
-        context_lines.append("\n请基于以上历史对话上下文，回答用户最新的问题。")
-        
-        return "\n".join(context_lines)
-    
-    @filter.command("clear_context")
-    async def clear_context(self, event: AstrMessageEvent):
-        """
-        清除当前会话的上下文记忆
-        
-        指令：/clear_context
-        """
-        session_id = event.session_id
-        
-        # 这里需要实现清除会话历史的逻辑
-        # 具体实现取决于AstrBot的会话管理API
-        
-        yield event.plain_result(f"已清除会话 {session_id} 的上下文记忆。")
-    
-    @filter.command("set_history_turns")
-    async def set_history_turns(self, event: AstrMessageEvent, turns: int):
-        """
-        设置保存历史对话的轮数
-        
-        指令：/set_history_turns 5
-        
-        参数:
-            turns: 保存的历史对话轮数
-        """
-        if turns < 0:
-            yield event.plain_result("轮数不能小于0。")
+        if "group_stats" not in stats:
+            yield event.plain_result("暂无全局统计数据！")
             return
+        
+        # 统计所有群的总发言数
+        total_groups = len(stats["group_stats"])
+        total_users = 0
+        total_messages = 0
+        
+        group_stats = []
+        for group_id, group_data in stats["group_stats"].items():
+            group_total = sum(user["count"] for user in group_data.values())
+            group_users = len(group_data)
             
-        self.max_history_turns = turns
-        yield event.plain_result(f"已设置历史对话轮数为 {turns}。")
+            total_users += group_users
+            total_messages += group_total
+            
+            group_stats.append(f"群{group_id}: {group_users}人, {group_total}条消息")
+        
+        message = "🌐 全局发言统计\n"
+        message += "=" * 30 + "\n"
+        message += "\n".join(group_stats)
+        message += f"\n\n📊 总计: {total_groups}个群, {total_users}位用户, {total_messages}条消息"
+        
+        yield event.plain_result(message)
+    
+    async def terminate(self):
+        """插件卸载时清理资源"""
+        logger.info("群聊发言统计插件已卸载")
