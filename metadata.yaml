@@ -1,4 +1,4 @@
-name: astrbot_plugin_说～图片生成
+name: astrbot_plugin_say_picture
 display_name: 当检测到@某用户说～时，生成表情包
 desc: 整蛊群友的好东西
 version: v0.01
