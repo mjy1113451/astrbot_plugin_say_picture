@@ -5,7 +5,7 @@ from astrbot.api.star import Context, Star
 
 class MentionSayPlugin(Star):
     name = "mention_say_plugin"
-    version = "1.0.1"
+    version = "1.0.2"
     author = "AI Assistant"
     description = "当检测到@某用户说～时，生成表情包"
 
@@ -22,6 +22,14 @@ class MentionSayPlugin(Star):
         mentioned_user = match.group(1)
         say_content = match.group(2).strip()
 
+        # ── 调试日志 begin ──
+        print(f"[mention_say] raw_message: {event.raw_message}")
+        print(f"[mention_say] message_str_matched: {event.message_str_matched}")
+        print(f"[mention_say] unified_msg_origin: {event.unified_msg_origin}")
+        print(f"[mention_say] mentioned_user: {mentioned_user}")
+        print(f"[mention_say] say_content: {say_content}")
+        # ── 调试日志 end ──
+
         if not say_content:
             return
 
@@ -34,8 +42,9 @@ class MentionSayPlugin(Star):
             )
             if member_info:
                 avatar_url = member_info.get("avatar")
-        except Exception:
-            pass
+                print(f"[mention_say] avatar_url: {avatar_url}")
+        except Exception as e:
+            print(f"[mention_say] get_group_member_info error: {e}")
 
         if not avatar_url:
             yield event.plain_result(f"未找到用户 {mentioned_user} 的信息")
@@ -45,8 +54,8 @@ class MentionSayPlugin(Star):
         prompt = (
             f"一个聊天界面截图，显示一个用户头像在左边，右边有消息框。"
             f"头像是一个圆形图片，显示被@用户的头像。"
-            f"在头像上方显示'LV100'的灰色标签。"
-            f"右边的消息框是白色圆角矩形，里面显示'{say_content}'的文字。"
+            f"在头像上方显示\"LV100\"的灰色标签。"
+            f"右边的消息框是白色圆角矩形，里面显示\"{say_content}\"的文字。"
             f"整体风格是简约的聊天界面，背景是浅灰色。"
         )
 
