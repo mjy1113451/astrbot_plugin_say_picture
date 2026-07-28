@@ -12,7 +12,7 @@ class MentionSayPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
 
-@filter.regex(r"@(\S+)\s+说～(.*)")
+    @filter.regex(r"@(\S+)\s+说～(.*)")
     async def on_mention_say(self, event: AstrMessageEvent):
         """检测 @用户 说～ 格式并生成表情包"""
         if not self.context.get_config().get("enabled", True):
