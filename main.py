@@ -22,7 +22,7 @@ class MentionSayPlugin(Star):
         match = event.get_matched_result()  # 或者 event.matched_result
         if not match:
             return
-            
+
         mentioned_user = match.group(1)
         say_content = match.group(2).strip()
 
@@ -51,7 +51,7 @@ class MentionSayPlugin(Star):
             else:
                 # 获取用户信息的方式可能不同
                 pass
-                
+
             print(f"[mention_say] avatar_url: {avatar_url}")
         except Exception as e:
             print(f"[mention_say] get_group_member_info error: {e}")
