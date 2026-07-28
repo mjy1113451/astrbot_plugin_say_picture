@@ -7,3 +7,9 @@ Astrbot 当检测到@某用户说～时，生成表情包插件
 在 AstrBot WebUI 插件市场搜索 astrbot_plugin_say_picture 直接安装。
 
 方式二：手动安装
+
+# 1. 克隆仓库
+git clone https://github.com/mjy1113451/astrbot_plugin_say_picture.git
+
+# 2. 将内容放入 AstrBot 插件目录后重启
+# 通常目录为：AstrBot/plugins/
