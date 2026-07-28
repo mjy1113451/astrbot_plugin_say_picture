@@ -1,0 +1,8 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "是否开启 @说～ 表情包功能",
+    "default": true,
+    "label": "功能开关"
+  }
+}
