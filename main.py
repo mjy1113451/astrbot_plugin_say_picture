@@ -1,75 +1,145 @@
 import re
-from astrbot.api.event import filter, AstrMessageEvent
+from io import BytesIO
+from typing import Any
+
+from PIL import Image, ImageDraw, ImageFont
+
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 
 class MentionSayPlugin(Star):
     name = "mention_say_plugin"
-    version = "1.0.2"
+    version = "1.0.3"
     author = "AI Assistant"
     description = "当检测到@某用户说～时，生成表情包"
 
     def __init__(self, context: Context):
         super().__init__(context)
 
-    @filter.regex(r"@(\S+)\s+说～(.*)")
+    # 修复点 #1: 正则改为匹配 OneBot CQ 码中的 @ 提及
+    # OneBot v11 协议下, 真实 @ 提及会以 [CQ:at,qq=123456] 形式出现在 message_str 中
+    @filter.regex(r"^\[CQ:at,qq=(\d+)\]\s*说～(.*)")
     async def on_mention_say(self, event: AstrMessageEvent):
         """检测 @用户 说～ 格式并生成表情包"""
         if not self.context.get_config().get("enabled", True):
             return
 
-        # 获取匹配结果
-        match = event.get_matched_result()  # 或者 event.matched_result
+        # 修复点 #2: @filter.regex 不会自动注入 match 对象,
+        # 必须自己用 re.search 在 event.message_str 上匹配
+        match = re.search(r"^\[CQ:at,qq=(\d+)\]\s*说～(.*)", event.message_str.strip())
         if not match:
             return
 
-        mentioned_user = match.group(1)
+        mentioned_user_id = match.group(1)
         say_content = match.group(2).strip()
 
-        # ── 调试日志 begin ──
+        # 调试日志
         print(f"[mention_say] message_str: {event.message_str}")
-        print(f"[mention_say] mentioned_user: {mentioned_user}")
+        print(f"[mention_say] mentioned_user_id: {mentioned_user_id}")
         print(f"[mention_say] say_content: {say_content}")
-        # ── 调试日志 end ──
 
         if not say_content:
             return
 
-        # 获取被@用户的头像（注意：可能需要不同的API）
-        avatar_url = None
+        # 修复点 #3 & #4: 不再使用 self.context.get_group_member_info,
+        # AstrBot Context 没有该方法.
+        # 头像优先通过 OneBot 适配器 (aiocqhttp) 的 bot.call_action 获取,
+        # 若不在 aiocqhttp 平台, 则使用 QQ 公开的头像 CDN 作为后备.
+        avatar_bytes: bytes | None = None
         try:
-            # 这里可能需要根据实际情况调整API调用方式
-            # 方法1：如果是群聊
-            if event.is_group():
-                member_info = await self.context.get_group_member_info(
-                    group_id=event.group_id,  # 注意属性名
-                    user_id=mentioned_user,
-                )
-                if member_info:
+            bot = getattr(event, "bot", None)
+            if bot is not None and event.get_group_id():
+                try:
+                    member_info: dict[str, Any] = await bot.call_action(
+                        "get_group_member_info",
+                        group_id=int(event.get_group_id()),
+                        user_id=int(mentioned_user_id),
+                        no_cache=True,
+                    )
                     avatar_url = member_info.get("avatar")
-            # 方法2：如果是私聊
-            else:
-                # 获取用户信息的方式可能不同
-                pass
+                except Exception:
+                    avatar_url = None
 
-            print(f"[mention_say] avatar_url: {avatar_url}")
+                if not avatar_url:
+                    # 通过 get_image_url 获取真实头像 URL
+                    try:
+                        avatar_url = await bot.call_action(
+                            "get_image_url",
+                            file=f"https://q1.qlogo.cn/g?b=qq&nk={mentioned_user_id}&s=640",
+                        )
+                    except Exception:
+                        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={mentioned_user_id}&s=640"
+
+                # 下载头像
+                import urllib.request
+
+                with urllib.request.urlopen(avatar_url, timeout=10) as resp:
+                    avatar_bytes = resp.read()
         except Exception as e:
-            print(f"[mention_say] get_group_member_info error: {e}")
+            print(f"[mention_say] 获取头像失败: {e}")
 
-        if not avatar_url:
-            yield event.plain_result(f"未找到用户 {mentioned_user} 的信息")
+        if avatar_bytes is None:
+            # 至少给出一张纯文字表情包, 不要让插件静默失败
+            yield event.plain_result(
+                f"未找到用户 {mentioned_user_id} 的头像信息，但表情包内容是：{say_content}"
+            )
             return
 
-        # 生成表情包描述
-        prompt = (
-            f"一个聊天界面截图，显示一个用户头像在左边，右边有消息框。"
-            f"头像是一个圆形图片，显示被@用户的头像。"
-            f"在头像上方显示\"LV100\"的灰色标签。"
-            f"右边的消息框是白色圆角矩形，里面显示\"{say_content}\"的文字。"
-            f"整体风格是简约的聊天界面，背景是浅灰色。"
-        )
+        # 修复点 #5: self.context.llm_generate_image 不存在.
+        # 改为使用 PIL 本地渲染, 直接 yield 字节流给 event.image_result.
+        try:
+            img = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
+            img = img.resize((120, 120))
+            # 圆形遮罩
+            mask = Image.new("L", img.size, 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, img.size[0], img.size[1]), fill=255)
+            avatar_img = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            avatar_img.paste(img, (0, 0), mask)
 
-        # 调用图片生成工具
-        image_url = await self.context.llm_generate_image(prompt)
-        if image_url:
-            yield event.image_result(image_url)
+            canvas_w, canvas_h = 640, 200
+            canvas = Image.new("RGB", (canvas_w, canvas_h), (245, 245, 245))
+            canvas.paste(avatar_img, (20, 40), avatar_img)
+
+            draw = ImageDraw.Draw(canvas)
+            try:
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 28
+                )
+            except Exception:
+                font = ImageFont.load_default()
+
+            # LV100 标签
+            try:
+                font_small = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 18
+                )
+            except Exception:
+                font_small = ImageFont.load_default()
+            draw.text((20, 15), "LV100", fill=(150, 150, 150), font=font_small)
+
+            # 消息气泡
+            bubble_x0, bubble_y0 = 160, 60
+            bubble_x1, bubble_y1 = canvas_w - 20, 140
+            draw.rounded_rectangle(
+                (bubble_x0, bubble_y0, bubble_x1, bubble_y1),
+                radius=12,
+                fill=(255, 255, 255),
+                outline=(220, 220, 220),
+            )
+            draw.text(
+                (bubble_x0 + 14, bubble_y0 + 14),
+                say_content,
+                fill=(30, 30, 30),
+                font=font,
+            )
+
+            buf = BytesIO()
+            canvas.save(buf, format="PNG")
+            image_bytes = buf.getvalue()
+        except Exception as e:
+            print(f"[mention_say] 渲染表情包失败: {e}")
+            yield event.plain_result(f"表情包生成失败: {e}")
+            return
+
+        yield event.image_result(image_bytes)
