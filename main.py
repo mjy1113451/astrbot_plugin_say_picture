@@ -4,13 +4,13 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import At, Image as AstrImage, Plain
 from astrbot.api.star import Context, Star
 
 
 class MentionSayPlugin(Star):
     name = "mention_say_plugin"
-    version = "1.0.5"
+    version = "1.0.6"
     author = "AI Assistant"
     description = "当检测到@某用户说～时，生成表情包"
 
@@ -156,4 +156,7 @@ class MentionSayPlugin(Star):
             yield event.plain_result(f"表情包生成失败: {e}")
             return
 
-        yield event.image_result(image_bytes)
+        # event.image_result() 仅接受 str (URL 或路径), 传入 bytes 会触发
+        # TypeError: startswith first arg must be bytes or a tuple of bytes, not str.
+        # 改用 chain_result + AstrImage.fromBytes() 直接传字节流.
+        yield event.chain_result([AstrImage.fromBytes(image_bytes)])
