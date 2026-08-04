@@ -8,26 +8,32 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 
+# 匹配 "@某人 说内容" 与 "@某人 说～内容" 两种 OneBot CQ 消息.
+# - [CQ:at,qq=(\d+)]   捕获被 @ 用户的 QQ
+# - \s*                兼容 0..N 个空白 (含 Tab)
+# - 说～?               波浪号变为可选, 兼容用户两种格式
+MENTION_SAY_PATTERN = r"^\[CQ:at,qq=(\d+)\]\s*说～?(.*)"
+
+
 class MentionSayPlugin(Star):
     name = "mention_say_plugin"
-    version = "1.0.3"
+    version = "1.0.4"
     author = "AI Assistant"
     description = "当检测到@某用户说～时，生成表情包"
 
     def __init__(self, context: Context):
         super().__init__(context)
 
-    # 修复点 #1: 正则改为匹配 OneBot CQ 码中的 @ 提及
-    # OneBot v11 协议下, 真实 @ 提及会以 [CQ:at,qq=123456] 形式出现在 message_str 中
-    @filter.regex(r"^\[CQ:at,qq=(\d+)\]\s*说～(.*)")
+    # @filter.regex 不会自动注入匹配对象, 这里自己用 re 模块匹配同一份正则.
+    # 必须与下方 MENTION_SAY_PATTERN 保持完全一致, 否则会出现
+    # "装饰器能匹配但回调内 match 为 None" 的诡异 bug.
+    @filter.regex(MENTION_SAY_PATTERN)
     async def on_mention_say(self, event: AstrMessageEvent):
-        """检测 @用户 说～ 格式并生成表情包"""
+        """检测 @用户 说～ 或 @用户 说 内容格式并生成表情包"""
         if not self.context.get_config().get("enabled", True):
             return
 
-        # 修复点 #2: @filter.regex 不会自动注入 match 对象,
-        # 必须自己用 re.search 在 event.message_str 上匹配
-        match = re.search(r"^\[CQ:at,qq=(\d+)\]\s*说～(.*)", event.message_str.strip())
+        match = re.search(MENTION_SAY_PATTERN, event.message_str.strip())
         if not match:
             return
 
@@ -62,14 +68,9 @@ class MentionSayPlugin(Star):
                     avatar_url = None
 
                 if not avatar_url:
-                    # 通过 get_image_url 获取真实头像 URL
-                    try:
-                        avatar_url = await bot.call_action(
-                            "get_image_url",
-                            file=f"https://q1.qlogo.cn/g?b=qq&nk={mentioned_user_id}&s=640",
-                        )
-                    except Exception:
-                        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={mentioned_user_id}&s=640"
+                    avatar_url = (
+                        f"https://q1.qlogo.cn/g?b=qq&nk={mentioned_user_id}&s=640"
+                    )
 
                 # 下载头像
                 import urllib.request
