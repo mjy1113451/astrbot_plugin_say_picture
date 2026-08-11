@@ -2,10 +2,92 @@ from io import BytesIO
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
+import urllib.request
+import os
+import tempfile
 
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Image as AstrImage, Plain
 from astrbot.api.star import Context, Star
+
+# ---------------------------------------------------------------------------
+# 中文字体：优先从系统常见路径加载，找不到则从 Noto CJK GitHub Release 下载.
+# ---------------------------------------------------------------------------
+
+_CN_FONT_CANDIDATES = [
+    # Linux (Debian/Ubuntu)
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    # Linux (RHEL/CentOS/Fedora)
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
+    "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+    # macOS
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+    # Windows
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simsun.ttc",
+    "C:/Windows/Fonts/msyhbd.ttc",
+]
+
+# Noto Sans SC — permissive OFL license, ~8 MB
+_NOTO_SANS_SC_URL = (
+    "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/"
+    "NotoSansSC-Regular.otf"
+)
+_FONT_CACHE_DIR: str | None = None  # lazy-initialized
+
+
+def _get_font_cache_dir() -> str:
+    global _FONT_CACHE_DIR
+    if _FONT_CACHE_DIR is None:
+        _FONT_CACHE_DIR = os.path.join(tempfile.gettempdir(), "astrbot_say_font")
+        os.makedirs(_FONT_CACHE_DIR, exist_ok=True)
+    return _FONT_CACHE_DIR
+
+
+def _download_cn_font() -> str | None:
+    """Download Noto Sans SC if not cached yet. Returns path or None."""
+    cache_dir = _get_font_cache_dir()
+    cached = os.path.join(cache_dir, "NotoSansSC-Regular.otf")
+    if os.path.isfile(cached):
+        return cached
+    try:
+        print("[mention_say] 系统无中文字体，正在下载 Noto Sans SC ...")
+        urllib.request.urlretrieve(_NOTO_SANS_SC_URL, cached)
+        print(f"[mention_say] 字体已缓存到 {cached}")
+        return cached
+    except Exception as e:
+        print(f"[mention_say] 字体下载失败: {e}")
+        return None
+
+
+def _load_cn_font(size: int = 26) -> ImageFont.FreeTypeFont:
+    """Try system Chinese fonts, then download Noto Sans SC as fallback."""
+    for path in _CN_FONT_CANDIDATES:
+        if os.path.isfile(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    downloaded = _download_cn_font()
+    if downloaded:
+        try:
+            return ImageFont.truetype(downloaded, size)
+        except Exception:
+            pass
+    # Last resort: PIL bitmap font (no CJK support)
+    return ImageFont.load_default()
+
+
+# ---------------------------------------------------------------------------
+# Plugin
+# ---------------------------------------------------------------------------
 
 
 class MentionSayPlugin(Star):
@@ -17,14 +99,9 @@ class MentionSayPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
 
-    # @filter.regex 仅作粗筛：消息中包含"说"字就触发回调.
-    # 真正的"是否含 @某用户 + 是否带说～"判断在回调内通过解析
-    # event.message_obj.message (消息链) 完成, 不依赖字符串正则,
-    # 因为 aiocqhttp 适配器已经把 [CQ:at,qq=N] 转换成 @昵称(qq) 文字格式,
-    # 无法再用正则从 message_str 中精确拿到被 @ 的 QQ.
     @filter.regex(r"说～?")
     async def on_mention_say(self, event: AstrMessageEvent):
-        """检测消息链中 \"At 某用户\" 紧跟 \"说[～]内容\" 格式"""
+        """检测消息链中 "At 某用户" 紧跟 "说[～]内容" 格式"""
         if not self.context.get_config().get("enabled", True):
             return
 
@@ -34,7 +111,6 @@ class MentionSayPlugin(Star):
 
         for comp in chain:
             if isinstance(comp, At):
-                # 仅记录第一个被 @ 的用户 (跳过 @全体成员)
                 if at_qq is None and str(comp.qq) != "all":
                     at_qq = comp.qq
             elif isinstance(comp, Plain):
@@ -43,12 +119,10 @@ class MentionSayPlugin(Star):
         if at_qq is None or not plain_parts:
             return
 
-        # 拼接所有 plain 段, 找出以 "说～?" 开头的部分
         full_text = "".join(plain_parts).strip()
         if not full_text.startswith("说"):
             return
 
-        # "说" 后允许 0..1 个全角波浪号 ～, 然后是真正的内容
         prefix = "说"
         rest = full_text[len(prefix) :].lstrip()
         if rest.startswith("～"):
@@ -60,12 +134,11 @@ class MentionSayPlugin(Star):
 
         mentioned_user_id = str(at_qq)
 
-        # 调试日志
         print(f"[mention_say] message_str: {event.message_str}")
         print(f"[mention_say] mentioned_user_id: {mentioned_user_id}")
         print(f"[mention_say] say_content: {say_content}")
 
-        # 获取被 @ 用户的头像: 优先走 OneBot 适配器, 失败时回退到 QLogo CDN.
+        # ---- 获取头像 ----
         avatar_bytes: bytes | None = None
         try:
             bot = getattr(event, "bot", None)
@@ -88,8 +161,6 @@ class MentionSayPlugin(Star):
                     f"https://q1.qlogo.cn/g?b=qq&nk={mentioned_user_id}&s=640"
                 )
 
-            import urllib.request
-
             with urllib.request.urlopen(avatar_url, timeout=10) as resp:
                 avatar_bytes = resp.read()
         except Exception as e:
@@ -97,66 +168,110 @@ class MentionSayPlugin(Star):
 
         if avatar_bytes is None:
             yield event.plain_result(
-                f"未找到用户 {mentioned_user_id} 的头像信息，但表情包内容是：{say_content}"
+                f"未找到用户 {mentioned_user_id} 的头像信息，"
+                f"但表情包内容是：{say_content}"
             )
             return
 
-        # 用 PIL 本地渲染头像 + 气泡表情包.
+        # ---- PIL 渲染 ----
         try:
-            img = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
-            img = img.resize((120, 120))
-            mask = Image.new("L", img.size, 0)
-            ImageDraw.Draw(mask).ellipse(
-                (0, 0, img.size[0], img.size[1]), fill=255
-            )
-            avatar_img = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            avatar_img.paste(img, (0, 0), mask)
+            avatar_size = 80
+            canvas_w, canvas_h = 640, 160
+            bubble_r = 10  # 气泡圆角
+            txt_pad = 10  # 气泡内文字边距
+            font_size = 26  # 正文字号
+            name_font_size = 14  # "LV100" 字号
 
-            canvas_w, canvas_h = 640, 200
+            # 字体（只加载一次，正文字体和标签字体各取所需大小）
+            font = _load_cn_font(font_size)
+            font_small = _load_cn_font(name_font_size)
+
+            # -- 头像（圆形裁剪） --
+            avatar_raw = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
+            avatar_raw = avatar_raw.resize(
+                (avatar_size, avatar_size), Image.LANCZOS
+            )
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            ImageDraw.Draw(mask).ellipse(
+                (0, 0, avatar_size - 1, avatar_size - 1), fill=255
+            )
+            avatar_img = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
+            avatar_img.paste(avatar_raw, (0, 0), mask)
+
+            # -- 气泡坐标（宽度固定，高度按文字行数动态计算） --
+            margin_x = 14
+            avatar_gap = 12
+            bubble_x0 = margin_x + avatar_size + avatar_gap  # ~106
+            bubble_x1 = canvas_w - margin_x  # 626
+            bubble_content_w = bubble_x1 - bubble_x0 - txt_pad * 2  # ~500
+            line_h = font_size + 4  # 行高
+
+            # -- 文字自动换行 --
+            lines: list[str] = []
+            current_line = ""
+            for char in say_content:
+                test_line = current_line + char
+                bbox = font.getbbox(test_line)
+                if bbox[2] <= bubble_content_w:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = char
+            if current_line:
+                lines.append(current_line)
+
+            # 气泡高度：取 avatar_size 与多行文字高度的较大值
+            text_block_h = len(lines) * line_h
+            bubble_h = max(avatar_size, text_block_h + txt_pad * 2)
+
+            # 画布高度随气泡动态调整（预留 LV100 标签空间）
+            needed_h = bubble_h + name_font_size + 12  # 气泡 + LV100 + 上下间距
+            canvas_h = max(canvas_h, needed_h)
+            bubble_y0 = (canvas_h - bubble_h) // 2
+            bubble_y1 = bubble_y0 + bubble_h
+
+            # 头像垂直居中
+            avatar_y = (canvas_h - avatar_size) // 2
+
+            # -- 画布 --
             canvas = Image.new("RGB", (canvas_w, canvas_h), (245, 245, 245))
-            canvas.paste(avatar_img, (20, 40), avatar_img)
+            canvas.paste(avatar_img, (margin_x, avatar_y), avatar_img)
 
             draw = ImageDraw.Draw(canvas)
-            try:
-                font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 28
-                )
-            except Exception:
-                font = ImageFont.load_default()
 
-            try:
-                font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 28
-                )
-            except Exception:
-                font_small = ImageFont.load_default()
+            # -- LV100 标签（气泡正上方） --
+            draw.text(
+                (bubble_x0, bubble_y0 - name_font_size - 4),
+                "LV100",
+                fill=(150, 150, 150),
+                font=font_small,
+            )
 
-            draw.text((160, 38), "LV100", fill=(150, 150, 150), font=font_small)
-
-            bubble_x0, bubble_y0 = 160, 60
-            bubble_x1, bubble_y1 = canvas_w - 20, 140
+            # -- 气泡 --
             draw.rounded_rectangle(
                 (bubble_x0, bubble_y0, bubble_x1, bubble_y1),
-                radius=12,
+                radius=bubble_r,
                 fill=(255, 255, 255),
                 outline=(220, 220, 220),
             )
-            draw.text(
-                (bubble_x0 + 14, bubble_y0 + 14),
-                say_content,
-                fill=(30, 30, 30),
-                font=font,
-            )
+
+            # -- 多行文字 --
+            for i, line_text in enumerate(lines):
+                draw.text(
+                    (bubble_x0 + txt_pad, bubble_y0 + txt_pad + i * line_h),
+                    line_text,
+                    fill=(30, 30, 30),
+                    font=font,
+                )
 
             buf = BytesIO()
             canvas.save(buf, format="PNG")
             image_bytes = buf.getvalue()
+
         except Exception as e:
             print(f"[mention_say] 渲染表情包失败: {e}")
             yield event.plain_result(f"表情包生成失败: {e}")
             return
 
-        # event.image_result() 仅接受 str (URL 或路径), 传入 bytes 会触发
-        # TypeError: startswith first arg must be bytes or a tuple of bytes, not str.
-        # 改用 chain_result + AstrImage.fromBytes() 直接传字节流.
         yield event.chain_result([AstrImage.fromBytes(image_bytes)])
