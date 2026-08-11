@@ -3,7 +3,7 @@ from typing import Any
 import os
 import tempfile
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 import urllib.request
 
 from astrbot.api.event import AstrMessageEvent, filter
@@ -60,7 +60,13 @@ def _download_cn_font() -> str | None:
         return cached
     try:
         print("[mention_say] 系统无中文字体，正在下载 Noto Sans SC ...")
-        urllib.request.urlretrieve(_NOTO_SANS_SC_URL, cached)
+        import socket
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(30)
+        try:
+            urllib.request.urlretrieve(_NOTO_SANS_SC_URL, cached)
+        finally:
+            socket.setdefaulttimeout(old_timeout)
         print(f"[mention_say] 字体已缓存到 {cached}")
         return cached
     except Exception as e:
@@ -202,7 +208,6 @@ class MentionSayPlugin(Star):
         bg_color = (232, 234, 237)       # 浅灰蓝背景
         shadow_color = (200, 202, 206)    # 阴影色
         avatar_size = 90
-        avatar_r = avatar_size // 2
         avatar_border = 3                 # 白色边框宽度
         margin_left = 24                  # 头像左边距
         avatar_gap = 14                   # 头像到气泡的间距
