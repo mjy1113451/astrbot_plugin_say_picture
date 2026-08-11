@@ -198,17 +198,41 @@ class MentionSayPlugin(Star):
             avatar_img = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
             avatar_img.paste(avatar_raw, (0, 0), mask)
 
-            # -- 气泡坐标 --
+            # -- 气泡坐标（宽度固定，高度按文字行数动态计算） --
             margin_x = 14
             avatar_gap = 12
             bubble_x0 = margin_x + avatar_size + avatar_gap  # ~106
             bubble_x1 = canvas_w - margin_x  # 626
-            bubble_h = avatar_size  # 80
-            bubble_y0 = (canvas_h - bubble_h) // 2  # 40
-            bubble_y1 = bubble_y0 + bubble_h  # 120
+            bubble_content_w = bubble_x1 - bubble_x0 - txt_pad * 2  # ~500
+            line_h = font_size + 4  # 行高
 
-            # -- 头像垂直居中 --
-            avatar_y = (canvas_h - avatar_size) // 2  # 40
+            # -- 文字自动换行 --
+            lines: list[str] = []
+            current_line = ""
+            for char in say_content:
+                test_line = current_line + char
+                bbox = font.getbbox(test_line)
+                if bbox[2] <= bubble_content_w:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = char
+            if current_line:
+                lines.append(current_line)
+
+            # 气泡高度：取 avatar_size 与多行文字高度的较大值
+            text_block_h = len(lines) * line_h
+            bubble_h = max(avatar_size, text_block_h + txt_pad * 2)
+
+            # 画布高度随气泡动态调整（预留 LV100 标签空间）
+            needed_h = bubble_h + name_font_size + 12  # 气泡 + LV100 + 上下间距
+            canvas_h = max(canvas_h, needed_h)
+            bubble_y0 = (canvas_h - bubble_h) // 2
+            bubble_y1 = bubble_y0 + bubble_h
+
+            # 头像垂直居中
+            avatar_y = (canvas_h - avatar_size) // 2
 
             # -- 画布 --
             canvas = Image.new("RGB", (canvas_w, canvas_h), (245, 245, 245))
@@ -216,7 +240,7 @@ class MentionSayPlugin(Star):
 
             draw = ImageDraw.Draw(canvas)
 
-            # -- LV100 标签（气泡上方） --
+            # -- LV100 标签（气泡正上方） --
             draw.text(
                 (bubble_x0, bubble_y0 - name_font_size - 4),
                 "LV100",
@@ -231,12 +255,15 @@ class MentionSayPlugin(Star):
                 fill=(255, 255, 255),
                 outline=(220, 220, 220),
             )
-            draw.text(
-                (bubble_x0 + txt_pad, bubble_y0 + txt_pad),
-                say_content,
-                fill=(30, 30, 30),
-                font=font,
-            )
+
+            # -- 多行文字 --
+            for i, line_text in enumerate(lines):
+                draw.text(
+                    (bubble_x0 + txt_pad, bubble_y0 + txt_pad + i * line_h),
+                    line_text,
+                    fill=(30, 30, 30),
+                    font=font,
+                )
 
             buf = BytesIO()
             canvas.save(buf, format="PNG")
