@@ -131,7 +131,7 @@ class MentionSayPlugin(Star):
             except Exception:
                 font_small = ImageFont.load_default()
 
-            draw.text((20, 15), "LV100", fill=(150, 150, 150), font=font_small)
+            draw.text((160, 30), "LV100", fill=(150, 150, 150), font=font_small)
 
             bubble_x0, bubble_y0 = 160, 60
             bubble_x1, bubble_y1 = canvas_w - 20, 140
