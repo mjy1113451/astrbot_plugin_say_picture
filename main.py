@@ -1,20 +1,23 @@
 from io import BytesIO
 from typing import Any
-
-from PIL import Image, ImageDraw, ImageFont
-import urllib.request
 import os
 import tempfile
+
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import urllib.request
 
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Image as AstrImage, Plain
 from astrbot.api.star import Context, Star
 
 # ---------------------------------------------------------------------------
-# 中文字体：优先从系统常见路径加载，找不到则从 Noto CJK GitHub Release 下载.
+# 中文字体加载（优先级：插件内置 → 系统路径 → 网络下载）
 # ---------------------------------------------------------------------------
 
-_CN_FONT_CANDIDATES = [
+# 插件自带的精简中文字体（微软雅黑子集，~6MB）
+_BUNDLED_FONT = os.path.join(os.path.dirname(__file__), "fonts", "msyh-subset.ttf")
+
+_SYSTEM_FONT_CANDIDATES = [
     # Linux (Debian/Ubuntu)
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
@@ -35,24 +38,22 @@ _CN_FONT_CANDIDATES = [
     "C:/Windows/Fonts/msyhbd.ttc",
 ]
 
-# Noto Sans SC — permissive OFL license, ~8 MB
 _NOTO_SANS_SC_URL = (
     "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/"
     "NotoSansSC-Regular.otf"
 )
-_FONT_CACHE_DIR: str | None = None  # lazy-initialized
+_font_cache_dir: str | None = None
 
 
 def _get_font_cache_dir() -> str:
-    global _FONT_CACHE_DIR
-    if _FONT_CACHE_DIR is None:
-        _FONT_CACHE_DIR = os.path.join(tempfile.gettempdir(), "astrbot_say_font")
-        os.makedirs(_FONT_CACHE_DIR, exist_ok=True)
-    return _FONT_CACHE_DIR
+    global _font_cache_dir
+    if _font_cache_dir is None:
+        _font_cache_dir = os.path.join(tempfile.gettempdir(), "astrbot_say_font")
+        os.makedirs(_font_cache_dir, exist_ok=True)
+    return _font_cache_dir
 
 
 def _download_cn_font() -> str | None:
-    """Download Noto Sans SC if not cached yet. Returns path or None."""
     cache_dir = _get_font_cache_dir()
     cached = os.path.join(cache_dir, "NotoSansSC-Regular.otf")
     if os.path.isfile(cached):
@@ -68,20 +69,28 @@ def _download_cn_font() -> str | None:
 
 
 def _load_cn_font(size: int = 26) -> ImageFont.FreeTypeFont:
-    """Try system Chinese fonts, then download Noto Sans SC as fallback."""
-    for path in _CN_FONT_CANDIDATES:
+    """按优先级加载中文字体：内置 → 系统 → 下载 → 默认位图."""
+    # 1) 插件内置字体（最可靠）
+    if os.path.isfile(_BUNDLED_FONT):
+        try:
+            return ImageFont.truetype(_BUNDLED_FONT, size)
+        except Exception:
+            pass
+    # 2) 系统字体
+    for path in _SYSTEM_FONT_CANDIDATES:
         if os.path.isfile(path):
             try:
                 return ImageFont.truetype(path, size)
             except Exception:
                 continue
+    # 3) 网络下载
     downloaded = _download_cn_font()
     if downloaded:
         try:
             return ImageFont.truetype(downloaded, size)
         except Exception:
             pass
-    # Last resort: PIL bitmap font (no CJK support)
+    # 4) 最终兜底
     return ImageFont.load_default()
 
 
@@ -92,7 +101,7 @@ def _load_cn_font(size: int = 26) -> ImageFont.FreeTypeFont:
 
 class MentionSayPlugin(Star):
     name = "mention_say_plugin"
-    version = "1.0.6"
+    version = "1.0.7"
     author = "AI Assistant"
     description = "当检测到@某用户说～时，生成表情包"
 
@@ -123,8 +132,7 @@ class MentionSayPlugin(Star):
         if not full_text.startswith("说"):
             return
 
-        prefix = "说"
-        rest = full_text[len(prefix) :].lstrip()
+        rest = full_text[len("说"):].lstrip()
         if rest.startswith("～"):
             rest = rest[1:].lstrip()
         say_content = rest.strip()
@@ -175,103 +183,168 @@ class MentionSayPlugin(Star):
 
         # ---- PIL 渲染 ----
         try:
-            avatar_size = 80
-            canvas_w, canvas_h = 640, 160
-            bubble_r = 10  # 气泡圆角
-            txt_pad = 10  # 气泡内文字边距
-            font_size = 26  # 正文字号
-            name_font_size = 14  # "LV100" 字号
-
-            # 字体（只加载一次，正文字体和标签字体各取所需大小）
-            font = _load_cn_font(font_size)
-            font_small = _load_cn_font(name_font_size)
-
-            # -- 头像（圆形裁剪） --
-            avatar_raw = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
-            avatar_raw = avatar_raw.resize(
-                (avatar_size, avatar_size), Image.LANCZOS
-            )
-            mask = Image.new("L", (avatar_size, avatar_size), 0)
-            ImageDraw.Draw(mask).ellipse(
-                (0, 0, avatar_size - 1, avatar_size - 1), fill=255
-            )
-            avatar_img = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
-            avatar_img.paste(avatar_raw, (0, 0), mask)
-
-            # -- 气泡坐标（宽度固定，高度按文字行数动态计算） --
-            margin_x = 14
-            avatar_gap = 12
-            bubble_x0 = margin_x + avatar_size + avatar_gap  # ~106
-            bubble_x1 = canvas_w - margin_x  # 626
-            bubble_content_w = bubble_x1 - bubble_x0 - txt_pad * 2  # ~500
-            line_h = font_size + 4  # 行高
-
-            # -- 文字自动换行 --
-            lines: list[str] = []
-            current_line = ""
-            for char in say_content:
-                test_line = current_line + char
-                bbox = font.getbbox(test_line)
-                if bbox[2] <= bubble_content_w:
-                    current_line = test_line
-                else:
-                    if current_line:
-                        lines.append(current_line)
-                    current_line = char
-            if current_line:
-                lines.append(current_line)
-
-            # 气泡高度：取 avatar_size 与多行文字高度的较大值
-            text_block_h = len(lines) * line_h
-            bubble_h = max(avatar_size, text_block_h + txt_pad * 2)
-
-            # 画布高度随气泡动态调整（预留 LV100 标签空间）
-            needed_h = bubble_h + name_font_size + 12  # 气泡 + LV100 + 上下间距
-            canvas_h = max(canvas_h, needed_h)
-            bubble_y0 = (canvas_h - bubble_h) // 2
-            bubble_y1 = bubble_y0 + bubble_h
-
-            # 头像垂直居中
-            avatar_y = (canvas_h - avatar_size) // 2
-
-            # -- 画布 --
-            canvas = Image.new("RGB", (canvas_w, canvas_h), (245, 245, 245))
-            canvas.paste(avatar_img, (margin_x, avatar_y), avatar_img)
-
-            draw = ImageDraw.Draw(canvas)
-
-            # -- LV100 标签（气泡正上方） --
-            draw.text(
-                (bubble_x0, bubble_y0 - name_font_size - 4),
-                "LV100",
-                fill=(150, 150, 150),
-                font=font_small,
-            )
-
-            # -- 气泡 --
-            draw.rounded_rectangle(
-                (bubble_x0, bubble_y0, bubble_x1, bubble_y1),
-                radius=bubble_r,
-                fill=(255, 255, 255),
-                outline=(220, 220, 220),
-            )
-
-            # -- 多行文字 --
-            for i, line_text in enumerate(lines):
-                draw.text(
-                    (bubble_x0 + txt_pad, bubble_y0 + txt_pad + i * line_h),
-                    line_text,
-                    fill=(30, 30, 30),
-                    font=font,
-                )
-
-            buf = BytesIO()
-            canvas.save(buf, format="PNG")
-            image_bytes = buf.getvalue()
-
+            image_bytes = self._render_bubble(avatar_bytes, say_content)
         except Exception as e:
             print(f"[mention_say] 渲染表情包失败: {e}")
             yield event.plain_result(f"表情包生成失败: {e}")
             return
 
         yield event.chain_result([AstrImage.fromBytes(image_bytes)])
+
+    # ------------------------------------------------------------------
+    # 渲染核心
+    # ------------------------------------------------------------------
+
+    def _render_bubble(self, avatar_bytes: bytes, text: str) -> bytes:
+        """生成聊天气泡表情包，返回 PNG 字节."""
+        # ---- 常量 ----
+        canvas_w = 640
+        bg_color = (232, 234, 237)       # 浅灰蓝背景
+        shadow_color = (200, 202, 206)    # 阴影色
+        avatar_size = 90
+        avatar_r = avatar_size // 2
+        avatar_border = 3                 # 白色边框宽度
+        margin_left = 24                  # 头像左边距
+        avatar_gap = 14                   # 头像到气泡的间距
+
+        bubble_r = 14                     # 气泡圆角
+        bubble_pad_x = 16                 # 气泡内水平边距
+        bubble_pad_y = 14                 # 气泡内垂直边距
+        font_size = 30                    # 正文字号
+        name_font_size = 15               # LV100 字号
+        line_h = font_size + 6            # 行高
+
+        font = _load_cn_font(font_size)
+        font_small = _load_cn_font(name_font_size)
+
+        # ---- 文字换行 ----
+        bubble_x0 = margin_left + avatar_size + avatar_gap + 10  # +10 给三角留位
+        bubble_x1 = canvas_w - margin_left
+        content_w = bubble_x1 - bubble_x0 - bubble_pad_x * 2
+
+        lines: list[str] = []
+        cur = ""
+        for ch in text:
+            test = cur + ch
+            bbox = font.getbbox(test)
+            if bbox[2] <= content_w:
+                cur = test
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = ch
+        if cur:
+            lines.append(cur)
+
+        text_block_h = len(lines) * line_h
+        bubble_h = max(avatar_size, text_block_h + bubble_pad_y * 2)
+
+        # 画布高度
+        badge_h = name_font_size + 8
+        badge_gap = 6
+        needed_h = bubble_h + badge_h + badge_gap + 20
+        canvas_h = max(180, needed_h)
+
+        bubble_y0 = (canvas_h - bubble_h) // 2
+        bubble_y1 = bubble_y0 + bubble_h
+        avatar_y = (canvas_h - avatar_size) // 2
+
+        # ---- 1. 阴影层（RGBA）----
+        shadow_offset = 3
+        canvas_rgba = Image.new("RGBA", (canvas_w, canvas_h), bg_color + (255,))
+        shadow_draw = ImageDraw.Draw(canvas_rgba)
+
+        # 气泡阴影
+        shadow_draw.rounded_rectangle(
+            (bubble_x0 + shadow_offset, bubble_y0 + shadow_offset,
+             bubble_x1 + shadow_offset, bubble_y1 + shadow_offset),
+            radius=bubble_r,
+            fill=shadow_color + (90,),
+        )
+
+        # LV100 标签阴影
+        badge_x0 = bubble_x0
+        badge_x1 = bubble_x0 + 72
+        badge_y0 = bubble_y0 - badge_h - badge_gap
+        badge_y1 = badge_y0 + badge_h
+        shadow_draw.rounded_rectangle(
+            (badge_x0 + 2, badge_y0 + 2, badge_x1 + 2, badge_y1 + 2),
+            radius=6,
+            fill=shadow_color + (70,),
+        )
+
+        # ---- 2. 头像（圆形 + 白色边框）----
+        avatar_raw = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
+        avatar_raw = avatar_raw.resize((avatar_size, avatar_size), Image.LANCZOS)
+        # 圆形裁剪
+        mask = Image.new("L", (avatar_size, avatar_size), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
+        avatar_circle = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
+        avatar_circle.paste(avatar_raw, (0, 0), mask)
+        # 白色边框圆
+        border_size = avatar_size + avatar_border * 2
+        border_img = Image.new("RGBA", (border_size, border_size), (0, 0, 0, 0))
+        ImageDraw.Draw(border_img).ellipse(
+            (0, 0, border_size - 1, border_size - 1), fill=(255, 255, 255, 255)
+        )
+        border_img.paste(
+            avatar_circle,
+            (avatar_border, avatar_border),
+            avatar_circle,
+        )
+        canvas_rgba.paste(border_img, (margin_left, avatar_y - avatar_border), border_img)
+
+        draw = ImageDraw.Draw(canvas_rgba)
+
+        # ---- 3. LV100 标签（白字灰底圆角）----
+        draw.rounded_rectangle(
+            (badge_x0, badge_y0, badge_x1, badge_y1),
+            radius=6,
+            fill=(209, 211, 216, 255),
+        )
+        badge_text = "LV100"
+        bb = font_small.getbbox(badge_text)
+        tw = bb[2] - bb[0]
+        th = bb[3] - bb[1]
+        draw.text(
+            (badge_x0 + (72 - tw) // 2, badge_y0 + (badge_h - th) // 2 - 1),
+            badge_text,
+            fill=(255, 255, 255),
+            font=font_small,
+        )
+
+        # ---- 4. 气泡（白色圆角 + 三角指向头像）----
+        draw.rounded_rectangle(
+            (bubble_x0, bubble_y0, bubble_x1, bubble_y1),
+            radius=bubble_r,
+            fill=(255, 255, 255, 255),
+        )
+        # 三角形指针（气泡左侧中间偏上）
+        tri_x = bubble_x0
+        tri_y_mid = bubble_y0 + bubble_h // 3
+        tri_points = [
+            (tri_x - 8, tri_y_mid - 8),
+            (tri_x, tri_y_mid + 4),
+            (tri_x - 8, tri_y_mid + 16),
+        ]
+        draw.polygon(tri_points, fill=(255, 255, 255, 255))
+        # 用背景色覆盖三角左侧溢出（模拟三角嵌入气泡）
+        draw.line(
+            [(tri_x - 8, tri_y_mid - 7), (tri_x - 8, tri_y_mid + 15)],
+            fill=bg_color + (255,),
+            width=2,
+        )
+
+        # ---- 5. 多行文字 ----
+        for i, ln in enumerate(lines):
+            draw.text(
+                (bubble_x0 + bubble_pad_x, bubble_y0 + bubble_pad_y + i * line_h),
+                ln,
+                fill=(30, 30, 30),
+                font=font,
+            )
+
+        # ---- 导出 PNG ----
+        buf = BytesIO()
+        canvas_rgba.save(buf, format="PNG")
+        return buf.getvalue()
