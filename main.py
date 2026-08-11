@@ -125,13 +125,13 @@ class MentionSayPlugin(Star):
                 font = ImageFont.load_default()
 
             try:
-                font_small = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 18
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 28
                 )
             except Exception:
                 font_small = ImageFont.load_default()
 
-            draw.text((160, 30), "LV100", fill=(150, 150, 150), font=font_small)
+            draw.text((160, 38), "LV100", fill=(150, 150, 150), font=font_small)
 
             bubble_x0, bubble_y0 = 160, 60
             bubble_x1, bubble_y1 = canvas_w - 20, 140
