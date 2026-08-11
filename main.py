@@ -207,17 +207,17 @@ class MentionSayPlugin(Star):
         canvas_w = 640
         bg_color = (232, 234, 237)       # 浅灰蓝背景
         shadow_color = (200, 202, 206)    # 阴影色
-        avatar_size = 90
+        avatar_size = 80
         avatar_border = 3                 # 白色边框宽度
         margin_left = 24                  # 头像左边距
-        avatar_gap = 14                   # 头像到气泡的间距
+        avatar_gap = 12                   # 头像到三角的间距
 
-        bubble_r = 14                     # 气泡圆角
-        bubble_pad_x = 16                 # 气泡内水平边距
-        bubble_pad_y = 14                 # 气泡内垂直边距
-        font_size = 30                    # 正文字号
-        name_font_size = 15               # LV100 字号
-        line_h = font_size + 6            # 行高
+        bubble_r = 12                     # 气泡圆角
+        bubble_pad_x = 14                 # 气泡内水平边距
+        bubble_pad_y = 10                 # 气泡内垂直边距
+        font_size = 26                    # 正文字号
+        name_font_size = 14               # LV100 字号
+        line_h = font_size + 4            # 行高
 
         font = _load_cn_font(font_size)
         font_small = _load_cn_font(name_font_size)
@@ -246,13 +246,15 @@ class MentionSayPlugin(Star):
 
         # 画布高度
         badge_h = name_font_size + 8
-        badge_gap = 6
-        needed_h = bubble_h + badge_h + badge_gap + 20
-        canvas_h = max(180, needed_h)
+        badge_gap = 8
+        needed_h = bubble_h + badge_h + badge_gap + 24
+        canvas_h = max(160, needed_h)
 
         bubble_y0 = (canvas_h - bubble_h) // 2
         bubble_y1 = bubble_y0 + bubble_h
-        avatar_y = (canvas_h - avatar_size) // 2
+
+        # 头像偏上一点（比气泡中心高 8px）
+        avatar_y = (canvas_h - avatar_size) // 2 - 8
 
         # ---- 1. 阴影层（RGBA）----
         shadow_offset = 3
@@ -267,9 +269,13 @@ class MentionSayPlugin(Star):
             fill=shadow_color + (90,),
         )
 
-        # LV100 标签阴影
-        badge_x0 = bubble_x0
-        badge_x1 = bubble_x0 + 72
+        # LV100 标签（居中于气泡上方）
+        badge_text = "LV100"
+        badge_bb = font_small.getbbox(badge_text)
+        badge_tw = badge_bb[2] - badge_bb[0]
+        badge_w = badge_tw + 16  # 左右各8px内边距
+        badge_x0 = bubble_x0 + (bubble_x1 - bubble_x0 - badge_w) // 2
+        badge_x1 = badge_x0 + badge_w
         badge_y0 = bubble_y0 - badge_h - badge_gap
         badge_y1 = badge_y0 + badge_h
         shadow_draw.rounded_rectangle(
@@ -281,22 +287,16 @@ class MentionSayPlugin(Star):
         # ---- 2. 头像（圆形 + 白色边框）----
         avatar_raw = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
         avatar_raw = avatar_raw.resize((avatar_size, avatar_size), Image.LANCZOS)
-        # 圆形裁剪
         mask = Image.new("L", (avatar_size, avatar_size), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
         avatar_circle = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
         avatar_circle.paste(avatar_raw, (0, 0), mask)
-        # 白色边框圆
         border_size = avatar_size + avatar_border * 2
         border_img = Image.new("RGBA", (border_size, border_size), (0, 0, 0, 0))
         ImageDraw.Draw(border_img).ellipse(
             (0, 0, border_size - 1, border_size - 1), fill=(255, 255, 255, 255)
         )
-        border_img.paste(
-            avatar_circle,
-            (avatar_border, avatar_border),
-            avatar_circle,
-        )
+        border_img.paste(avatar_circle, (avatar_border, avatar_border), avatar_circle)
         canvas_rgba.paste(border_img, (margin_left, avatar_y - avatar_border), border_img)
 
         draw = ImageDraw.Draw(canvas_rgba)
@@ -307,35 +307,31 @@ class MentionSayPlugin(Star):
             radius=6,
             fill=(209, 211, 216, 255),
         )
-        badge_text = "LV100"
-        bb = font_small.getbbox(badge_text)
-        tw = bb[2] - bb[0]
-        th = bb[3] - bb[1]
         draw.text(
-            (badge_x0 + (72 - tw) // 2, badge_y0 + (badge_h - th) // 2 - 1),
+            (badge_x0 + (badge_w - badge_tw) // 2, badge_y0 + 2),
             badge_text,
             fill=(255, 255, 255),
             font=font_small,
         )
 
-        # ---- 4. 气泡（白色圆角 + 三角指向头像）----
+        # ---- 4. 气泡 + 三角指针 ----
         draw.rounded_rectangle(
             (bubble_x0, bubble_y0, bubble_x1, bubble_y1),
             radius=bubble_r,
             fill=(255, 255, 255, 255),
         )
-        # 三角形指针（气泡左侧中间偏上）
+        # 三角指向头像（气泡左侧，垂直对齐头像中心）
+        avatar_center_y = avatar_y + avatar_size // 2
         tri_x = bubble_x0
-        tri_y_mid = bubble_y0 + bubble_h // 3
         tri_points = [
-            (tri_x - 8, tri_y_mid - 8),
-            (tri_x, tri_y_mid + 4),
-            (tri_x - 8, tri_y_mid + 16),
+            (tri_x - 8, avatar_center_y - 8),
+            (tri_x, avatar_center_y + 4),
+            (tri_x - 8, avatar_center_y + 16),
         ]
         draw.polygon(tri_points, fill=(255, 255, 255, 255))
-        # 用背景色覆盖三角左侧溢出（模拟三角嵌入气泡）
+        # 覆盖三角左侧边缘
         draw.line(
-            [(tri_x - 8, tri_y_mid - 7), (tri_x - 8, tri_y_mid + 15)],
+            [(tri_x - 8, avatar_center_y - 7), (tri_x - 8, avatar_center_y + 15)],
             fill=bg_color + (255,),
             width=2,
         )
