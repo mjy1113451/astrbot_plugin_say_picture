@@ -281,7 +281,7 @@ class MentionSayPlugin(Star):
         badge_y1 = badge_y0 + badge_h
         shadow_draw.rounded_rectangle(
             (badge_x0 + 2, badge_y0 + 2, badge_x1 + 2, badge_y1 + 2),
-            rectangle(),
+            radius=10,
             fill=shadow_color + (70,),
         )
 
