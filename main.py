@@ -257,8 +257,8 @@ class MentionSayPlugin(Star):
         bubble_y0 = (canvas_h - bubble_h) // 2
         bubble_y1 = bubble_y0 + bubble_h
 
-        # 头像偏上一点（比气泡中心高 8px）
-        avatar_y = (canvas_h - avatar_size) // 2 - 8
+        # 头像偏上（比气泡顶部高一点）
+        avatar_y = bubble_y0 - 10
 
         # ---- 1. 阴影层（RGBA）----
         shadow_offset = 3
@@ -321,18 +321,18 @@ class MentionSayPlugin(Star):
             radius=bubble_r,
             fill=(255, 255, 255, 255),
         )
-        # 三角指向头像（气泡左侧，垂直对齐头像中心）
-        avatar_center_y = avatar_y + avatar_size // 2
-        tri_x = bubble_x0
+        # 三角指针（气泡左上角，指向头像方向）
+        tri_tip_x = bubble_x0          # 三角尖端（贴气泡左边缘）
+        tri_tip_y = bubble_y0 + 18     # 尖端垂直位置（气泡顶部偏下）
         tri_points = [
-            (tri_x - 8, avatar_center_y - 8),
-            (tri_x, avatar_center_y + 4),
-            (tri_x - 8, avatar_center_y + 16),
+            (tri_tip_x, tri_tip_y),           # 尖端（指向头像）
+            (tri_tip_x - 10, tri_tip_y - 10), # 左上
+            (tri_tip_x - 10, tri_tip_y + 10), # 左下
         ]
         draw.polygon(tri_points, fill=(255, 255, 255, 255))
-        # 覆盖三角左侧边缘
+        # 覆盖三角左侧边缘（用背景色画竖线，模拟三角嵌入效果）
         draw.line(
-            [(tri_x - 8, avatar_center_y - 7), (tri_x - 8, avatar_center_y + 15)],
+            [(tri_tip_x - 10, tri_tip_y - 9), (tri_tip_x - 10, tri_tip_y + 9)],
             fill=bg_color + (255,),
             width=2,
         )
