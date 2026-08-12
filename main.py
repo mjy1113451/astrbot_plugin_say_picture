@@ -305,7 +305,7 @@ class MentionSayPlugin(Star):
         # ---- 3. LV100 标签（白字灰底圆角）----
         draw.rounded_rectangle(
             (badge_x0, badge_y0, badge_x1, badge_y1),
-            rectangle(),
+            radius=10,
             fill=(209, 211, 216, 255),
         )
         draw.text(
