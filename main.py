@@ -309,7 +309,7 @@ class MentionSayPlugin(Star):
             fill=(209, 211, 216, 255),
         )
         draw.text(
-            (badge_x0 + (badge_w - badge_tw) // 2, badge_y0 + 2),
+            (badge_x0 + (badge_w - _badge_tw) // 2, badge_y0 + 2),
             badge_text,
             fill=(255, 255, 255),
             font=font_small,
