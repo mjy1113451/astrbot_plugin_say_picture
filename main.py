@@ -244,8 +244,12 @@ class MentionSayPlugin(Star):
         text_block_h = len(lines) * line_h
         bubble_h = max(avatar_size, text_block_h + bubble_pad_y * 2)
 
-        # 画布高度
-        badge_h = name_font_size + 8
+        # 画布高度（预计算 LV100 标签尺寸）
+        _badge_bb = font_small.getbbox("LV100")
+        _badge_tw = _badge_bb[2] - _badge_bb[0]
+        _badge_th = _badge_bb[3] - _badge_bb[1]
+        badge_w = _badge_tw + 14
+        badge_h = _badge_th + 8
         badge_gap = 8
         needed_h = bubble_h + badge_h + badge_gap + 24
         canvas_h = max(160, needed_h)
@@ -269,12 +273,9 @@ class MentionSayPlugin(Star):
             fill=shadow_color + (90,),
         )
 
-        # LV100 标签（居中于气泡上方）
+        # LV100 标签（贴气泡左边缘）
         badge_text = "LV100"
-        badge_bb = font_small.getbbox(badge_text)
-        badge_tw = badge_bb[2] - badge_bb[0]
-        badge_w = badge_tw + 16  # 左右各8px内边距
-        badge_x0 = bubble_x0 + (bubble_x1 - bubble_x0 - badge_w) // 2
+        badge_x0 = bubble_x0
         badge_x1 = badge_x0 + badge_w
         badge_y0 = bubble_y0 - badge_h - badge_gap
         badge_y1 = badge_y0 + badge_h
