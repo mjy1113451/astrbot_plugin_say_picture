@@ -204,7 +204,7 @@ class MentionSayPlugin(Star):
     def _render_bubble(self, avatar_bytes: bytes, text: str) -> bytes:
         """生成聊天气泡表情包，返回 PNG 字节."""
         # ---- 常量 ----
-        canvas_w = 640
+        canvas_w = 520
         bg_color = (232, 234, 237)       # 浅灰蓝背景
         shadow_color = (200, 202, 206)    # 阴影色
         avatar_size = 80
