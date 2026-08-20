@@ -119,5 +119,5 @@ astrbot_plugin_say_picture/
 ## 作者
 
 [mjy1113451](https://github.com/mjy1113451)
-
+[作者的插件群](https://qun.qq.com/universal-share/share?ac=1&authKey=LPNpKBYL2R3WqjbvADCCIA8XpZ%2Fqmitz2xpdkNNlOin%2BPz6ez8UCrbZDgneoR762&busi_data=eyJncm91cENvZGUiOiIxMDc1OTIwMzIzIiwidG9rZW4iOiJ0bG5BWjhZN2xkZXFlVk1WclZRNGNDVElCRW9CRG9ieFZzUEFwMEljaXNibzVOUUc1YkJSOC9NRnI4NTBOcEhkIiwidWluIjoiMTczMTUzODMzNCJ9&data=hV1Jra4PMbmVn17xmFmtJ-UBqIGZ7rBtO31vMQXm2h5RmBxeNr6YKfDa7FJAUe3MJS75Vl4LP7piI4YxWV2fOg&svctype=4&tempid=h5_group_info)
 如有问题或建议，欢迎提交 Issue 或联系作者。
