@@ -5,7 +5,7 @@ import urllib.request
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Image as AstrImage, Plain
 from astrbot.api.star import Context, Star
-from astrbot.api.star.star_tools import StarTools
+from astrbot.api.star import StarTools
 
 from .rendering.chat_screenshot import (
     render_chat_screenshot,
