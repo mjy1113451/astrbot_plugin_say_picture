@@ -55,9 +55,13 @@ class MentionSayPlugin(Star):
         except Exception as e:
             print(f"[mention_say] 字体后台下载失败（使用内置字体兜底）: {e}")
 
-    @filter.regex(r"说～?")
+    @filter.regex(r"说[\s～]")
     async def on_mention_say(self, event: AstrMessageEvent):
-        """检测消息链中 "At 某用户" 紧跟 "说[～]内容" 格式"""
+        """检测消息链中 "At 某用户" 紧跟 "说[～/空格]内容" 格式。
+
+        issue #54：「说」后必须有分隔符（空格或～），
+        避免「说话」「说明天见」等自然词误触发。
+        """
         if not self.context.get_config().get("enabled", True):
             return
 
@@ -79,9 +83,18 @@ class MentionSayPlugin(Star):
         if not full_text.startswith("说"):
             return
 
-        rest = full_text[len("说"):].lstrip()
-        if rest.startswith("～"):
+        rest = full_text[len("说"):]
+        if not rest:
+            return
+        if rest[0] == "～":
+            # 兼容：说～内容 / 说～ 内容
             rest = rest[1:].lstrip()
+        elif rest[0].isspace():
+            # 标准格式：说 + 空格 + 内容（支持全角空格 U+3000）
+            rest = rest.lstrip()
+        else:
+            # 「说话」「说明天见」等无分隔符自然词，不触发
+            return
         say_content = rest.strip()
 
         if not say_content:
