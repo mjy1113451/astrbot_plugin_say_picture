@@ -20,6 +20,8 @@ RESOURCES_DIR = Path(__file__).parent.parent / "resources"
 FONT_DIR: Path | None = None
 FONT_PATH = RESOURCES_DIR / "fonts" / "NotoSansSC-Regular.ttf"
 FONT_BOLD_PATH = RESOURCES_DIR / "fonts" / "NotoSansSC-Bold.ttf"
+# 字符级回退字体（issue #52: 昵称含韩文等主字体覆盖不到的字符时兜底）
+HANGUL_FONT_PATH = Path(__file__).parent.parent / "fonts" / "hangul-subset.ttf"
 
 # 模块级 FontManager，由插件入口注入 data_dir
 _font_manager: FontManager | None = None
@@ -156,6 +158,136 @@ def load_font(
     return ImageFont.load_default()
 
 
+# ---------------------------------------------------------------------------
+# 字符级字体回退（issue #52/#53：昵称含韩文等主字体不覆盖的字符时渲染 tofu）
+# ---------------------------------------------------------------------------
+
+_cmap_cache: dict[str, set[int] | None] = {}
+
+
+def _get_cmap(font_path: Path) -> set[int] | None:
+    """读取字体文件的 cmap（带缓存）；读取失败返回 None 表示不可用作回退."""
+    key = str(font_path)
+    if key in _cmap_cache:
+        return _cmap_cache[key]
+    cmap: set[int] | None = None
+    if font_path.exists():
+        try:
+            from fontTools.ttLib import TTFont
+
+            with TTFont(key, fontNumber=0, lazy=True) as tt:
+                cmap = set(tt.getBestCmap().keys())
+        except Exception as exc:
+            logger.warning("[say_picture] 读取字体 cmap 失败 %s: %s", key, exc)
+            cmap = None
+    _cmap_cache[key] = cmap
+    return cmap
+
+
+def _build_font_chain(
+    primary: ImageFont.FreeTypeFont,
+    bold: bool,
+    fallback_paths: list[str] | None,
+) -> list[tuple[ImageFont.FreeTypeFont, set[int] | None]]:
+    """构造有序字体链 [(font, cmap)]：主字体在前，msyh 子集/韩文子集兜底."""
+    chain: list[tuple[ImageFont.FreeTypeFont, set[int] | None]] = []
+    seen_paths: set[str] = set()
+
+    def _add(font: ImageFont.FreeTypeFont, path: Path | None) -> None:
+        if path is None:
+            return
+        key = str(path)
+        if key in seen_paths:
+            return
+        cmap = _get_cmap(path)
+        if cmap:
+            chain.append((font, cmap))
+            seen_paths.add(key)
+
+    primary_path = getattr(primary, "path", None)
+    if primary_path:
+        _add(primary, Path(primary_path))
+
+    # 兜底 1: 内置 msyh 子集（CJK 基本区 + 假名 + 符号，CDN Noto 缺字形时补位）
+    msyh = Path(__file__).parent.parent / "fonts" / "msyh-subset.ttf"
+    if msyh.exists():
+        try:
+            _add(ImageFont.truetype(str(msyh), primary.size), msyh)
+        except Exception:
+            pass
+
+    # 兜底 2: 内置韩文子集（msyh 与 Noto Sans SC 均不含 Hangul）
+    if HANGUL_FONT_PATH.exists():
+        try:
+            _add(
+                ImageFont.truetype(str(HANGUL_FONT_PATH), primary.size),
+                HANGUL_FONT_PATH,
+            )
+        except Exception:
+            pass
+
+    # 兜底 3: 调用方注入的外部字体
+    for path in fallback_paths or []:
+        p = Path(path)
+        if p.exists():
+            try:
+                _add(ImageFont.truetype(str(p), primary.size), p)
+            except Exception:
+                continue
+
+    return chain
+
+
+def _segment_by_font(
+    text: str, chain: list[tuple[ImageFont.FreeTypeFont, set[int] | None]]
+) -> list[tuple[ImageFont.FreeTypeFont, str]]:
+    """按「哪个字体有该字符字形」把文本切分成 (font, segment) 序列.
+
+    主字体缺字形的字符（如韩文）切换到链中第一个有字形的字体，
+    全链都缺的字符保留在当前段（由 PIL 渲染 .notdef，与原行为一致）.
+    """
+    segments: list[tuple[ImageFont.FreeTypeFont, str]] = []
+    current_font = chain[0][0] if chain else None
+    buf = ""
+
+    for ch in text:
+        cp = ord(ch)
+        target_font = current_font
+        for font, cmap in chain:
+            if cmap is None:
+                continue
+            if cp in cmap:
+                target_font = font
+                break
+        else:
+            # 无任何字体覆盖：保留在当前段
+            target_font = current_font
+
+        if target_font is not current_font and buf:
+            segments.append((current_font, buf))
+            buf = ""
+        current_font = target_font
+        buf += ch
+
+    if buf and current_font is not None:
+        segments.append((current_font, buf))
+    return segments
+
+
+def _measure_segmented(
+    text: str, chain: list[tuple[ImageFont.FreeTypeFont, set[int] | None]]
+) -> tuple[int, int]:
+    """按分段字体测量文本 bbox 宽高（用于昵称宽度测量）."""
+    total_w = 0
+    max_h = 0
+    for font, seg in _segment_by_font(text, chain):
+        bbox = font.getbbox(seg)
+        if bbox:
+            total_w += bbox[2] - bbox[0]
+            max_h = max(max_h, bbox[3] - bbox[1])
+    return total_w, max_h
+
+
 def get_bundled_fallback_paths() -> list[str]:
     """返回插件内置 msyh 子集字体路径，供 load_font 的 fallback_paths 使用."""
     bundled = Path(__file__).parent.parent / "fonts" / "msyh-subset.ttf"
@@ -217,14 +349,24 @@ def _draw_text(
     font,
     fill,
     emoji_offset_y: int = 0,
+    fallback_paths: list[str] | None = None,
 ) -> None:
+    # 字符级回退：主字体缺字形的字符（如韩文）用后备字体补画
+    chain = _build_font_chain(font, bold=False, fallback_paths=fallback_paths)
+
     pilmoji_class = _get_pilmoji_class()
+    x, y = position
+
     if pilmoji_class:
+        # pilmoji 有完整 emoji 渲染；仍按字符级回退分段，逐段交给 pilmoji
         try:
-            with pilmoji_class(
-                image, emoji_position_offset=(0, emoji_offset_y)
-            ) as pilmoji:
-                pilmoji.text(position, text, font=font, fill=fill)
+            for seg_font, seg in _segment_by_font(text, chain):
+                with pilmoji_class(
+                    image, emoji_position_offset=(0, emoji_offset_y)
+                ) as pilmoji:
+                    pilmoji.text((x, y), seg, font=seg_font, fill=fill)
+                bbox = seg_font.getbbox(seg)
+                x += (bbox[2] - bbox[0]) if bbox else 0
             return
         except Exception as exc:
             # 渲染阶段（emoji 图片网络拉取等）失败时回退到纯文本，
@@ -232,7 +374,10 @@ def _draw_text(
             logger.warning("[say_picture] pilmoji 渲染失败，回退纯文本: %s", exc)
 
     draw = ImageDraw.Draw(image)
-    draw.text(position, sanitize_display_text(text), font=font, fill=fill)
+    for seg_font, seg in _segment_by_font(text, chain):
+        draw.text((x, y), seg, font=seg_font, fill=fill)
+        bbox = seg_font.getbbox(seg)
+        x += (bbox[2] - bbox[0]) if bbox else 0
 
 
 def make_dialog_box(
@@ -301,6 +446,7 @@ def make_dialog_box(
             font,
             "black",
             emoji_offset_y=emoji_offset_y,
+            fallback_paths=fallback_paths,
         )
         current_y += line_height + line_spacing
 
@@ -343,9 +489,11 @@ def render_chat_screenshot(
     safe_text = sanitize_display_text(text, preserve_emoji=preserve_emoji)
 
     name_font = load_font(name_font_size, bold=False, fallback_paths=fallback_paths)
-    name_bbox = name_font.getbbox(safe_name)
-    name_w = name_bbox[2] - name_bbox[0]
-    name_h = name_bbox[3] - name_bbox[1]
+    # 字符级回退测量：昵称可能含主字体缺字形的字符（韩文等），逐段取宽
+    _name_chain = _build_font_chain(
+        name_font, bold=False, fallback_paths=fallback_paths
+    )
+    name_w, name_h = _measure_segmented(safe_name, _name_chain)
 
     label_img = None
     label_w = 0
@@ -435,6 +583,7 @@ def render_chat_screenshot(
                 label_font,
                 "white",
                 emoji_offset_y=emoji_offset_y,
+                fallback_paths=fallback_paths,
             )
             bbox = title_img.getbbox()
             if bbox:
@@ -493,6 +642,7 @@ def render_chat_screenshot(
         name_font,
         "#868894",
         emoji_offset_y=emoji_offset_y,
+        fallback_paths=fallback_paths,
     )
 
     output = io.BytesIO()
