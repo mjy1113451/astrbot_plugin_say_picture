@@ -44,16 +44,7 @@ git clone https://github.com/mjy1113451/astrbot_plugin_say_picture.git
 
 ## 配置
 
-插件有一个开关配置项：
-
-```json
-// config.json
-{
-  "enabled": true   // true=开启，false=关闭
-}
-```
-
-在 AstrBot WebUI 的插件配置页面也可以直接修改。
+插件无可配置项（旧版 `enabled` 功能开关已删除，issue #63）。如需整体停用本功能，请在 AstrBot WebUI 插件管理页直接禁用本插件。
 
 ---
 
