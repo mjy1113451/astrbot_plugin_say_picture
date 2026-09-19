@@ -138,9 +138,6 @@ class MentionSayPlugin(Star):
         issue #54：「说」后必须有分隔符（空格或～），
         避免「说话」「说明天见」等自然词误触发。
         """
-        if not self.context.get_config().get("enabled", True):
-            return
-
         chain = event.message_obj.message or []
         at_qq: str | int | None = None
         plain_parts: list[str] = []
